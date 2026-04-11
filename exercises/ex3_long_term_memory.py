@@ -302,3 +302,5 @@ if __name__ == "__main__":
 
     # Second run — facts from the first run are in memory["facts"]
     run_agent("What did we just learn about planets?")
+    
+    run_agent("What did we just learn about saturn?")

@@ -563,6 +563,342 @@ Main agent (ex6_agent_as_tool.py)
 
 ---
 
+## Exercise 7 — The Manager Pattern
+
+**Files:** `researcher_agent.py` (new specialist) + `ex7_manager_pattern.py` (the manager)
+
+### What the exercise asks
+
+Build an outer agent whose *only* tools are other agents. No `search`, no
+`calculate`, no `get_time` — just specialists. The outer agent is a pure
+orchestrator. Its job is to pick the right specialist, give it the right
+input, and combine the outputs into a final answer.
+
+### How it differs from Exercise 6
+
+Exercise 6 added one agent-as-tool (`summarize`) alongside normal tools.
+Exercise 7 goes all-in: the manager has **nothing but** agent-tools.
+
+```
+ex6 TOOLS = {search, calculate, save_note, get_time, summarize}
+                                                      ^-- one agent-tool
+
+ex7 TOOLS = {researcher, summarizer}
+              ^            ^
+              both are full SPAOR agents
+```
+
+That single change forces the outer agent to *plan the workflow* instead of
+reaching for raw tools. It is the same mental step a human team lead makes
+when they stop doing the work themselves and start delegating.
+
+### Step 1 — build a second specialist: `researcher_agent.py`
+
+It is shaped exactly like `summarizer_agent.py`: private `_memory`, private
+`_call_llm`, its own `_TOOLS`, its own SPAOR loop, one public entry point
+`run_researcher_agent(topic)` that takes a string and returns a string.
+
+Its tools are `kb_search` and `list_topics` — both pure Python, no LLM
+needed to run them. The specialist collects `[source] text` lines into
+`_memory["facts"]` and returns them joined by newlines.
+
+```python
+def run_researcher_agent(topic):
+    _memory["history"].clear()
+    _memory["facts"].clear()
+    for i in range(1, MAX_ITERATIONS + 1):
+        context = _sense(topic, i)
+        decision = _plan(context)
+        if decision.get("action") == "COMPLETE":
+            return decision.get("answer") or "\n".join(_memory["facts"])
+        observation = _observe(decision, _act(decision))
+        _reflect(decision, observation)
+    return "\n".join(_memory["facts"])
+```
+
+Everything outside that function starts with an underscore. That is a Python
+convention for "private" and it matters here — it is how we make sure the
+researcher's state never collides with anyone else's.
+
+### Step 2 — wrap each specialist as a one-line tool
+
+```python
+def tool_researcher(topic):
+    return run_researcher_agent(topic)
+
+def tool_summarizer(text):
+    return run_summarizer_agent(text)
+
+TOOLS = {
+    "researcher": {"description": "...", "function": tool_researcher},
+    "summarizer": {"description": "...", "function": tool_summarizer},
+}
+```
+
+Compare to `ex6_agent_as_tool.py`: the wiring is identical. The only
+difference is what is *missing* — there are no direct-work tools at all.
+
+### Step 3 — the `LAST_RESEARCH` sentinel
+
+Here is a subtle design choice worth explaining. When the manager wants to
+hand the researcher's output to the summarizer, it should NOT copy that
+output into its own prompt — that would balloon its context window and blow
+up token usage (remember Exercise 5: prompts cost tokens).
+
+Instead, we teach the manager to write a tiny placeholder:
+
+```json
+{"tool": "summarizer", "args": "LAST_RESEARCH"}
+```
+
+And we expand the placeholder in `act()`:
+
+```python
+args = decision.get("args") or ""
+if args == "LAST_RESEARCH":
+    args = memory["last_research"] or ""
+```
+
+The long text lives in Python memory, not in the LLM's context. The manager
+only has to remember the *word* `LAST_RESEARCH`. That is a 1-token cost vs.
+potentially thousands.
+
+This is a reusable trick: whenever your agent needs to pass a large blob
+between tool calls, store the blob in code and let the agent reference it
+by name.
+
+### Step 4 — the manager's loop
+
+The loop is a boring copy of SPAOR. The only interesting thing is that when
+it calls `act()`, a whole second SPAOR loop runs inside a specialist agent,
+prints its own trace, and comes back with a string. The manager is none the
+wiser.
+
+```
+--- MANAGER ITERATION 1 ---
+🧠 PLAN → action: USE_TOOL, tool: researcher, args: "jupiter and saturn"
+  [RESEARCHER AGENT STARTED]
+    [RESEARCHER] PLAN → kb_search("jupiter")
+    [RESEARCHER] PLAN → kb_search("saturn")
+    [RESEARCHER] PLAN → COMPLETE
+  [RESEARCHER AGENT DONE]
+⚡ ACT → "[jupiter] ... [saturn] ..."
+
+--- MANAGER ITERATION 2 ---
+🧠 PLAN → action: USE_TOOL, tool: summarizer, args: "LAST_RESEARCH"
+  [SUMMARIZER AGENT STARTED]
+    ...full summarizer loop...
+  [SUMMARIZER AGENT DONE]
+⚡ ACT → "Jupiter and Saturn are..."
+
+--- MANAGER ITERATION 3 ---
+🧠 PLAN → action: COMPLETE, answer: "Jupiter and Saturn are..."
+```
+
+### The mental model
+
+> The manager is a team lead, not an engineer. It does not open the codebase.
+> It picks the right engineer, hands them the ticket, reads the result, and
+> decides the next move.
+
+Everything you already know about SPAOR still applies — the only thing that
+changed is the *granularity* of a "tool". A tool used to be a function. Now
+it is an agent. Zoom out one level and the abstraction is identical.
+
+### When to use this pattern
+
+- You have multiple distinct skills that benefit from their own memory,
+  tools, and prompting (research, summarization, code generation, review).
+- You want to swap, version, or test each specialist independently.
+- You want the outer agent's prompt to stay small — it only needs to know
+  *about* specialists, not *how* they work.
+
+If your task fits in one set of tools, don't reach for a manager. This
+pattern earns its keep once you have two or more clearly different jobs.
+
+---
+
+## Exercise 8 — The Handoff Pattern
+
+**File:** `ex8_handoff_pattern.py` (reuses `researcher_agent.py` + `summarizer_agent.py`)
+
+### What the exercise asks
+
+Instead of the outer agent *calling* a specialist and waiting for a return
+value, the outer agent **transfers control** to a specialist and exits. The
+specialist owns the rest of the task. If it needs another specialist, it
+hands off again. Control never returns to the original agent.
+
+### Handoff vs. Manager — the one-sentence difference
+
+> Manager is a function call: `result = specialist(input)`.
+> Handoff is a `goto`: the specialist becomes the active agent; the caller
+> is done.
+
+That sounds small. In practice it changes who decides what happens next.
+
+| | Manager pattern | Handoff pattern |
+|---|---|---|
+| Who plans the next step? | The manager, after each specialist returns | The currently active specialist |
+| Does control come back? | Yes, always | No, never |
+| How many specialists run? | Whatever the manager calls in its loop | A chain — each specialist decides if it's terminal or hands off |
+| Best when... | You need to *combine* results from multiple specialists | You need to *route* a task to the right specialist once, then get out of the way |
+
+### Step 1 — the triage agent has no loop and no tools
+
+This is the most important line of the exercise. Read it twice.
+
+> The triage agent is a single LLM call that outputs a routing decision.
+> That is the entire agent.
+
+No SPAOR, no tools, no memory. It does one job: "which specialist should
+own this task?" — and then it disappears.
+
+```python
+def triage(user_goal):
+    system = """You are a TRIAGE agent. ... Reply with JSON:
+    { "target": "<researcher or summarizer>",
+      "handoff_goal": "<rewritten for that specialist>",
+      "reasoning": "..." }"""
+    raw = call_llm([
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"User goal: {user_goal}"},
+    ])
+    return _parse_json(raw)
+```
+
+A triage agent being "just a classifier" is not a code smell — it is the
+point. Complexity belongs in the specialists, not in the router.
+
+### Step 2 — a common result contract for every participating agent
+
+The orchestrator needs one simple rule to know what to do next. We give
+every specialist the same shape of return value:
+
+```python
+{"kind": "done",     "answer": "..."}                          # terminal
+{"kind": "handoff",  "target": "summarizer", "goal": "..."}    # pass control
+```
+
+The underlying `run_researcher_agent()` and `run_summarizer_agent()` both
+return bare strings — we do not want to modify them. So we wrap them:
+
+```python
+def run_researcher_with_handoff(goal, user_goal):
+    facts = run_researcher_agent(goal)
+    if _wants_summary(user_goal):
+        return {"kind": "handoff", "target": "summarizer", "goal": facts}
+    return {"kind": "done", "answer": facts}
+
+
+def run_summarizer_with_handoff(goal, user_goal):
+    return {"kind": "done", "answer": run_summarizer_agent(goal)}
+```
+
+The wrappers are where the "should I hand off?" policy lives. For the demo
+we use a dead-simple Python check: if the original user goal mentions
+"summarize" or "one sentence" or "tl;dr", the researcher hands off to the
+summarizer when it's done. In a richer version you would let the specialist
+itself decide (another small LLM call, or a structured output field).
+
+### Step 3 — the orchestrator is a while loop
+
+Because every participating agent speaks the same result contract, the
+orchestrator is almost trivial:
+
+```python
+def run_with_handoff(user_goal):
+    decision = triage(user_goal)
+    current_target = decision["target"]
+    current_goal = decision["handoff_goal"]
+
+    for hop in range(MAX_HANDOFFS):
+        result = AGENTS[current_target](current_goal, user_goal)
+        if result["kind"] == "done":
+            return result["answer"]
+        # handoff
+        current_target = result["target"]
+        current_goal = result["goal"]
+```
+
+Read that loop carefully. There is no outer "brain" making decisions each
+hop — the loop just does what the *current* specialist says. This is
+literally a `goto` between agents, implemented in ten lines.
+
+### Why a `MAX_HANDOFFS` cap?
+
+Same reason you cap `MAX_ITERATIONS` in a SPAOR loop: a buggy specialist
+could hand off to another specialist that hands back to the first, and you
+get an infinite ping-pong. The cap makes the system fail loudly instead of
+silently burning tokens.
+
+### Tracing a full run
+
+```
+🎯 USER GOAL: Research Jupiter and Saturn and give me a one-sentence summary.
+
+[TRIAGE] decision: {"target": "researcher", "handoff_goal": "jupiter saturn"}
+[HANDOFF] triage → researcher
+
+  [RESEARCHER AGENT STARTED] topic=jupiter saturn
+  ...SPAOR loop runs...
+  [RESEARCHER AGENT DONE] → 2 facts
+
+[HANDOFF] researcher → summarizer
+
+  [SUMMARIZER AGENT STARTED]
+  ...SPAOR loop runs...
+  [SUMMARIZER AGENT DONE] → Jupiter and Saturn are...
+
+FINAL ANSWER (from summarizer): Jupiter and Saturn are the two largest...
+Handoffs used: 2
+```
+
+Notice two things:
+
+1. Triage only appears at the very top. It never runs again.
+2. The final answer comes out of *the summarizer*, not out of the triage or
+   some outer wrapper. In the handoff pattern, whichever specialist returns
+   `{"kind": "done"}` is the one that speaks to the user.
+
+### The mental model
+
+> Handoff is the receptionist pattern. You walk into a building, say what
+> you need, the receptionist points you down the hall, and you go. The
+> receptionist does not follow you. If the person you reach realizes you
+> actually need someone else, *they* walk you over. You never return to
+> the front desk.
+
+Compare that to the manager:
+
+> Manager is the general contractor pattern. You tell the contractor what
+> you want. They call the plumber, wait for the plumber to finish, call the
+> electrician, wait, and finally tell you the job is done. You talk to the
+> contractor the whole time.
+
+Both are useful. Neither is strictly better. The question is whether the
+*caller* needs to stay in the loop to combine results (manager) or whether
+each step in the chain can make the next routing decision on its own
+(handoff).
+
+### When to use handoffs
+
+- Triage / intake flows where the right specialist depends on the input.
+- Multi-stage pipelines where each stage naturally owns what happens next.
+- Situations where you want the active agent's prompt to stay focused on
+  its own job — it does not need to know about the orchestrator at all.
+
+### When NOT to use handoffs
+
+- If you need to *combine* outputs from several specialists into one answer.
+  That is what a manager is for — the manager is the only one with the full
+  picture. A handoff chain cannot look backwards.
+- If you need the original caller to enforce success conditions across the
+  chain. Once triage hands off, it has no way to reject the final answer.
+  Put the gate in whichever specialist actually produces the final answer.
+
+---
+
 ## Putting it all together
 
 Here is a summary of the single mental model that connects every exercise:
@@ -578,6 +914,8 @@ Here is a summary of the single mental model that connects every exercise:
 | Success condition | A check in the loop before accepting `COMPLETE` | Code-enforced guarantee that the goal is really met |
 | Cost | `response.usage.total_tokens` | How much context you sent + received |
 | Agent-as-tool | A tool function that calls `run_summarizer_agent()` | A full SPAOR agent wrapped as a tool; the caller sees only a string |
+| Manager pattern | An outer agent whose `TOOLS` dict contains only other agents | A team lead: picks specialists, combines their output, owns the final answer |
+| Handoff pattern | A router that transfers control to a specialist and exits | A receptionist: points you to the right person and disappears; control never returns |
 
 Every exercise is really the same lesson restated: **the agent loop is just a
 Python `for` loop, and the LLM is just a function that reads text and writes
