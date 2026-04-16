@@ -1,6 +1,6 @@
 # Agents From First Principles — One File, Zero Magic
 
-A single-file, beginners-first AI agent. No classes, no frameworks, no
+A single-file to build AI agent from scratch. No classes, no frameworks, no
 clever abstractions. Just functions you can read top to bottom in one sitting.
 
 It teaches all the building blocks of an agent:
@@ -15,8 +15,6 @@ It teaches all the building blocks of an agent:
 > **SPAOR** = **S**ense → **P**lan → **A**ct → **O**bserve → **R**eflect
 >
 > Each letter is one function in `simple_agent.py`. That's the whole agent.
-> Act comes before Observe because you can only observe the consequences
-> of something that actually happened.
 
 ---
 
