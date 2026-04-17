@@ -25,12 +25,14 @@ _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # The researcher owns its own small KB so it is a true self-contained
 # specialist. A real project would back this with a vector store or an API.
 _KB = {
-    "mars": "Mars is the fourth planet from the Sun. NASA's Perseverance rover landed in Jezero Crater in February 2021.",
-    "jupiter": "Jupiter is the largest planet in the solar system, a gas giant famous for the Great Red Spot storm.",
-    "saturn": "Saturn is known for its extensive ring system of ice and rock, and has 146 known moons including Titan.",
-    "venus": "Venus is the second planet from the Sun and the hottest planet, with surface temperatures around 465°C.",
-    "mercury": "Mercury is the smallest planet and the closest to the Sun, completing one orbit every 88 Earth days.",
-    "neptune": "Neptune is an ice giant with the fastest winds in the solar system, reaching over 2,000 km/h.",
+    "mars": "Mars is the fourth planet from the Sun. NASA's Perseverance rover landed in Jezero Crater in February 2021. Mars has two small moons, Phobos and Deimos. Its surface gravity is about 38% of Earth's.",
+    "jupiter": "Jupiter is the largest planet in the solar system, a gas giant famous for the Great Red Spot storm. It has at least 95 known moons, including the four Galilean moons: Io, Europa, Ganymede, and Callisto. Jupiter's mass is more than twice that of all other planets combined.",
+    "saturn": "Saturn is known for its extensive ring system of ice and rock, and has 146 known moons including Titan. Titan is the only moon with a dense atmosphere. Saturn's density is so low it would float in water.",
+    "venus": "Venus is the second planet from the Sun and the hottest planet, with surface temperatures around 465°C. It rotates backwards compared to most planets. A day on Venus is longer than its year.",
+    "mercury": "Mercury is the smallest planet and the closest to the Sun, completing one orbit every 88 Earth days. Despite being closest to the Sun, it is not the hottest planet. Mercury has no atmosphere and no moons.",
+    "neptune": "Neptune is an ice giant with the fastest winds in the solar system, reaching over 2,000 km/h. It has 16 known moons, the largest being Triton. Neptune takes 165 Earth years to orbit the Sun.",
+    "earth": "Earth is the third planet from the Sun and the only known planet to support life. It has one natural satellite, the Moon. About 71% of Earth's surface is covered by water.",
+    "uranus": "Uranus is an ice giant that rotates on its side, with an axial tilt of about 98 degrees. It has 28 known moons and a faint ring system. Uranus was the first planet discovered with a telescope, by William Herschel in 1781.",
 }
 
 _memory = {
@@ -127,10 +129,15 @@ Available tools:
 {tool_list}
 
 Recommended workflow:
-1. Use list_topics once if you are unsure what is available.
-2. Use kb_search one or more times to pull text about the topic.
-3. When you have at least {MIN_FACTS} distinct facts, declare COMPLETE and put
+1. Use kb_search one or more times to pull text about the topic.
+2. When you have at least {MIN_FACTS} distinct facts, declare COMPLETE and put
    them all in the answer field, joined by newlines.
+
+CRITICAL RULES:
+- You MUST use kb_search at least once BEFORE declaring COMPLETE.
+- Do NOT declare COMPLETE if "Facts collected so far" below is empty ([]).
+  You have zero facts until kb_search returns them.
+- Do NOT invent or assume facts. Only use what kb_search returns.
 
 Reply with ONE JSON object only:
 {{
@@ -230,6 +237,18 @@ def run_researcher_agent(topic):
         decision = _plan(context)
 
         if decision.get("action") == "COMPLETE":
+            if len(_memory["facts"]) < MIN_FACTS:
+                print(
+                    f"\n  [RESEARCHER] ⛔ COMPLETE rejected: "
+                    f"{len(_memory['facts'])}/{MIN_FACTS} facts collected. "
+                    f"Must search first."
+                )
+                _memory["history"].append({
+                    "tool": None,
+                    "observation": f"COMPLETE rejected: need {MIN_FACTS} facts, have {len(_memory['facts'])}",
+                    "progress": False,
+                })
+                continue
             answer = decision.get("answer") or "\n".join(_memory["facts"])
             _reflect(decision, {"kind": "none", "ok": True, "summary": ""})
             break

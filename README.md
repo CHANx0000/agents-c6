@@ -15,20 +15,31 @@ It teaches all the building blocks of an agent:
 > **SPAOR** = **S**ense → **P**lan → **A**ct → **O**bserve → **R**eflect
 >
 > Each letter is one function in `simple_agent.py`. That's the whole agent.
-> Act comes before Observe because you can only observe the consequences
-> of something that actually happened.
 
 ---
 
-## Learning Outcomes
+## Repository Layout
 
-By the end of this lesson you will be able to:
-
-1. Explain the SPAOR loop and point at the line of code that implements each phase.
-2. Add a new tool in three lines.
-3. Plug in memory so the agent remembers what it tried last turn.
-4. Use tracing to debug a run when the agent misbehaves.
-5. Define a clear success condition and a max-iteration cap.
+```
+.
+├── simple_agent.py              the single-file agent (~250 lines)
+├── exercises/                   single-agent exercises (ex1–ex5)
+│   ├── ex1_get_time.py
+│   ├── ex2_break_search.py
+│   ├── ex3_long_term_memory.py
+│   ├── ex4_success_condition.py
+│   ├── ex5_cost_tracking.py
+│   └── TUTORIAL.md              walkthrough for ex1–ex5
+├── multiagent/                  multi-agent patterns (ex6–ex8)
+│   ├── researcher_agent.py      specialist: collects facts from a KB
+│   ├── fact_checker_agent.py    specialist: verifies claims against a KB
+│   ├── summarizer_agent.py      specialist: compresses text into one sentence
+│   ├── ex6_agent_as_tool.py     agent-as-tool pattern
+│   ├── ex7_manager_pattern.py   manager / orchestrator-workers pattern
+│   ├── ex8_handoff_pattern.py   handoff / decentralized pattern
+│   └── TUTORIAL.md              walkthrough for ex6–ex8
+└── requirements.txt
+```
 
 ---
 
@@ -50,72 +61,16 @@ cp .env.example .env
 ### 3. Run
 
 ```bash
+# Single agent
 python simple_agent.py
+
+# Multi-agent patterns (run from multiagent/)
+cd multiagent
+python ex7_manager_pattern.py
+python ex8_handoff_pattern.py
 ```
 
-The agent uses `openai/gpt-oss-120b` on Groq by default — it's fast and free to try.
-
----
-
-## What you'll see
-
-```
-============================================================
-🎯 GOAL: What is 25 * 4 + 100?
-============================================================
-
---- ITERATION 1 ---
-
-👁  SENSE
-  iteration: 1
-  goal: What is 25 * 4 + 100?
-  history_len: 0
-  notes: (empty)
-
-🧠 PLAN
-  action: USE_TOOL
-  tool: calculate
-  args: 25 * 4 + 100
-  reasoning: Direct math — use calculate.
-
-⚡ ACT
-  tool: calculate
-  args: 25 * 4 + 100
-  result: 200
-
-🔭 OBSERVE
-  kind: result
-  ok: True
-  summary: 200
-
-💭 REFLECT
-  progress: True
-  comment: The calculation gives the final value needed.
-
---- ITERATION 2 ---
-...
-✅ FINAL ANSWER: 200
-```
-
-Every phase prints a line. If something goes wrong, the trace tells you
-exactly which phase broke.
-
----
-
-## The File Tour
-
-`simple_agent.py` is ~250 lines, organized in reading order:
-
-| Section | What it is | Why it matters |
-|---|---|---|
-| 0. `call_llm` | The only function that touches the API | One choke-point = easy to log, mock, or swap models |
-| 1. `TOOLS` | A dict of tool name → function | Tools are just functions. The LLM picks by name. |
-| 2. `rag_lookup` | Keyword search over a tiny knowledge base | Real RAG uses embeddings; the shape is the same |
-| 3. `memory` | A dict with history + scratchpad | Stateless LLMs need you to hand-feed the past |
-| 4. `trace` | Pretty-printer for every phase | The difference between debuggable and mysterious |
-| 5. `sense / plan / act / observe / reflect` | Five small functions | **This is the whole agent** |
-| 6. `run_agent` | The loop that calls the five functions | 20 lines |
-| 7. `parse_json` | Pulls JSON out of an LLM reply | LLMs wrap JSON in prose; handle it once |
+The agent uses `openai/gpt-oss-120b` on Groq by default.
 
 ---
 
@@ -134,51 +89,40 @@ rearrangement of these same five moves.
 
 ---
 
-## Exercises — Progressive
+## Exercises
+
+### Part 1 — Single Agent (`exercises/`)
 
 Do these in order. Each builds on the previous one.
 
-### 1. Add a tool
+| # | Exercise | Key concept |
+|---|---|---|
+| 1 | Add a `get_time` tool | Registering tools |
+| 2 | Break a tool on purpose | Error handling, hallucination prevention |
+| 3 | Add long-term memory | Facts that survive across runs |
+| 4 | Enforce a success condition | Hard guards in the loop |
+| 5 | Cost tracking | Token budgets per phase |
 
-Add `get_time` to `TOOLS`. It should take no useful argument and return the
-current time. Run the agent with the goal `"What time is it?"` and confirm
-the LLM picks your new tool.
+See `exercises/TUTORIAL.md` for the full walkthrough.
 
-### 2. Break a tool on purpose
+### Part 2 — Multi-Agent Patterns (`multiagent/`)
 
-Make `tool_search` always return `"no results"`. Run the research goal
-again. Does the agent detect the failure and try something else, or does
-it hallucinate an answer? Tighten the `reflect` prompt until the agent
-gives up cleanly instead of lying.
+These introduce three specialists (researcher, fact-checker, summarizer) and
+two coordination patterns.
 
-### 3. Add long-term memory
+| # | Exercise | Pattern |
+|---|---|---|
+| 6 | Agent as a tool | One agent calls another like any other tool |
+| 7 | Manager pattern | Pure orchestrator whose only tools are agents |
+| 8 | Handoff pattern | Triage routes, specialists chain without a manager |
 
-Extend `memory` with a `facts` list. Every time `reflect` sees
-`progress: true`, append a one-line fact to `memory["facts"]`. In `sense`,
-pass the last 5 facts into the context. Now run two goals in a row and
-notice the second one reuses what the first one learned.
+The three specialists:
 
-### 4. Enforce a real success condition
+- **Researcher** — searches a planet KB, collects 2+ facts
+- **Fact-checker** — extracts claims, checks each against the KB, produces a VERIFIED/WEAK verdict
+- **Summarizer** — compresses text into one sentence
 
-Change the goal to:
-
-> "Collect at least 3 distinct facts about planets in the solar system."
-
-Track unique sources in `memory["notes"]` and only allow `COMPLETE` when
-there are 3+. The agent should keep searching on its own until the bar is
-met, then stop.
-
-### 5. Cost tracking (stretch)
-
-Wrap `call_llm` so every call records `response.usage.total_tokens` into a
-`memory["tokens"]` counter. At the end of the run, print the total. Which
-phase — Plan or Reflect — burns the most tokens? Why?
-
-### 6. A second agent as a tool (stretch)
-
-Write `tool_summarize(text)` that calls `call_llm` with a "summarize in one
-sentence" prompt. Notice that a tool can itself be an LLM call — that's the
-entire idea behind "agent-as-tool" and multi-agent systems.
+See `multiagent/TUTORIAL.md` for the full walkthrough.
 
 ---
 
@@ -205,8 +149,8 @@ Once you've done the exercises, natural next steps:
 - Swap the keyword `rag_lookup` for real embeddings (e.g. `sentence-transformers` + FAISS).
 - Replace the text protocol with Groq's native tool-use API.
 - Split the single file into modules — only once you *feel* the seams.
-- Run two agents in parallel and give one the other as a tool.
+- Add more specialists (writer, code reviewer) to the multi-agent patterns.
 
-This file is the foundation. Everything else in "agent land" — planners,
+This repo is the foundation. Everything else in "agent land" — planners,
 routers, multi-agent systems, evaluators — is just more of the same five
 moves wired together in new ways.

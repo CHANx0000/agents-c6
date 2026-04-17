@@ -1,2 +1,4 @@
 .env
 agent-c6/
+__pycache__/
+*.py[cod]

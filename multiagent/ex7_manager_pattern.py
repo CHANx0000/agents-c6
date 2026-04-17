@@ -16,13 +16,13 @@ Pattern recap:
         |  MANAGER  |     plans the workflow
         +-----+-----+
               |
-     +--------+--------+
-     |                 |
-  researcher       summarizer     <- full SPAOR agents, each a specialist
-     |                 |
-   (kb_search)    (split_text,
-   (list_topics)   find_topic,
-                   write_summary)
+     +--------+--------+---------+
+     |                 |         |
+  researcher       summarizer  fact_checker  <- full SPAOR agents
+     |                 |         |
+   (kb_search)    (split_text, (extract_claims,
+   (list_topics)   find_topic,  check_claim,
+                   write_summary) verdict)
 
 The manager never touches a KB or a calculator directly. It delegates.
 """
@@ -34,9 +34,10 @@ import re
 from dotenv import load_dotenv
 from groq import Groq
 
-# Both tools ARE full agents — the manager has nothing else.
+# All tools ARE full agents — the manager has nothing else.
 from researcher_agent import run_researcher_agent
 from summarizer_agent import run_summarizer_agent
+from fact_checker_agent import run_fact_checker_agent
 
 load_dotenv()
 
@@ -72,6 +73,12 @@ def tool_summarizer(text):
     return run_summarizer_agent(text)
 
 
+def tool_fact_checker(text):
+    if not text or not text.strip():
+        return "ERROR: fact_checker needs non-empty text"
+    return run_fact_checker_agent(text)
+
+
 TOOLS = {
     "researcher": {
         "description": (
@@ -87,15 +94,23 @@ TOOLS = {
         ),
         "function": tool_summarizer,
     },
+    "fact_checker": {
+        "description": (
+            "Delegate to the fact-checking specialist. It verifies claims in "
+            "a text against a knowledge base and returns a verdict. "
+            "args: text with claims to verify (string)"
+        ),
+        "function": tool_fact_checker,
+    },
 }
 
 
 memory = {
     "history": [],
-    "last_research": "",   # full researcher output (passed to summarizer via
-                           # the LAST_RESEARCH sentinel — keeps manager prompt small)
-    "last_summary": "",    # full summarizer output (once set, the manager
-                           # MUST COMPLETE with this text as its answer)
+    "last_research": "",   # full researcher output (passed to summarizer/fact_checker
+                           # via the LAST_RESEARCH sentinel — keeps manager prompt small)
+    "last_summary": "",    # full summarizer output
+    "last_verdict": "",    # full fact-checker output
     "tokens": {"total": 0},
 }
 
@@ -104,6 +119,7 @@ def reset_run_state():
     memory["history"].clear()
     memory["last_research"] = ""
     memory["last_summary"] = ""
+    memory["last_verdict"] = ""
     memory["tokens"] = {"total": 0}
 
 
@@ -130,7 +146,9 @@ def sense(goal, iteration):
         "history": memory["history"][-3:],
         "has_research": bool(memory["last_research"]),
         "has_summary": bool(memory["last_summary"]),
+        "has_verdict": bool(memory["last_verdict"]),
         "last_summary": memory["last_summary"],
+        "last_verdict": memory["last_verdict"],
     }
     trace("👁  SENSE (manager)", {
         "iteration": iteration,
@@ -138,6 +156,7 @@ def sense(goal, iteration):
         "history_len": len(memory["history"]),
         "has_research": context["has_research"],
         "has_summary": context["has_summary"],
+        "has_verdict": context["has_verdict"],
     })
     return context
 
@@ -152,22 +171,21 @@ you delegate to specialist agents. Your only tools are specialist agents.
 Available specialists:
 {tool_list}
 
-Typical workflow for a "research and summarize" goal:
+Typical workflow for a "research, verify, and summarize" goal:
   1. Call researcher with a topic.
-  2. Call summarizer with the researcher's output (passed verbatim).
-  3. Declare COMPLETE with the summary as the answer.
+  2. Call fact_checker with the researcher's output to verify claims.
+  3. Call summarizer with the researcher's output to produce a summary.
+  4. Declare COMPLETE with the summary as the answer.
 
 Rules you MUST follow:
 - Never invent facts. If you need information, call researcher.
-- When you call summarizer, the "args" field should be the word "LAST_RESEARCH"
-  and the orchestrator will substitute the most recent researcher output.
-  This keeps your JSON short and avoids copying long text into your own prompt.
+- When you call summarizer or fact_checker and want to pass the researcher's
+  output, set "args" to "LAST_RESEARCH" — the orchestrator will substitute
+  the full text. This keeps your JSON short.
 - If a summary is already available (shown below as "FINAL SUMMARY"), you are
   DONE. Set action to COMPLETE and copy the FINAL SUMMARY verbatim into the
   "answer" field. Do NOT call any more specialists.
-- Do NOT call the researcher a second time — one call is enough. The
-  researcher's output is never "truncated"; history previews may look short
-  but the full text is already stored and will be passed to the summarizer.
+- Do NOT call the researcher a second time — one call is enough.
 
 Reply with ONE JSON object only:
 {{
@@ -185,10 +203,17 @@ Reply with ONE JSON object only:
         else "FINAL SUMMARY: (not produced yet)\n"
     )
 
+    verdict_block = (
+        f"FACT-CHECK VERDICT: {context['last_verdict']}\n"
+        if context["has_verdict"]
+        else "FACT-CHECK VERDICT: (not done yet)\n"
+    )
+
     user = f"""Goal: {context['goal']}
 Iteration: {context['iteration']}
 Recent history: {json.dumps(context['history'], default=str)}
 Researcher output already available? {context['has_research']}
+{verdict_block}
 {summary_block}
 Decide the next delegation."""
 
@@ -231,6 +256,8 @@ def act(decision):
             memory["last_research"] = result
         elif name == "summarizer":
             memory["last_summary"] = result
+        elif name == "fact_checker":
+            memory["last_verdict"] = result
 
     trace("⚡ ACT (manager)", {"specialist": name, "result": result})
     return result
@@ -268,7 +295,7 @@ def reflect(goal, decision, observation):
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
-MAX_ITERATIONS = 6
+MAX_ITERATIONS = 8
 
 
 def run_manager(goal):
@@ -320,4 +347,6 @@ def _parse_json(text):
 
 
 if __name__ == "__main__":
-    run_manager("Research Jupiter and Saturn, then give me a one-sentence summary.")
+    run_manager(
+        "Research Jupiter and Saturn, verify the facts, then give me a one-sentence summary."
+    )

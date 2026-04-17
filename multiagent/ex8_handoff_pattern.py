@@ -17,7 +17,12 @@ Control never comes back.
                  ┌─────────────┐
                  │  RESEARCHER │  (runs full SPAOR, produces facts)
                  └──────┬──────┘
-                        │  HANDOFF (optional second step)
+                        │  HANDOFF
+                        ▼
+                 ┌──────────────┐
+                 │ FACT-CHECKER │  (verifies claims against KB)
+                 └──────┬───────┘
+                        │  HANDOFF (can go back to researcher if weak)
                         ▼
                  ┌──────────────┐
                  │  SUMMARIZER  │  (produces final one-sentence answer)
@@ -30,8 +35,10 @@ Key differences from ex7_manager_pattern.py:
   - Triage has NO loop and NO tools. It is a single LLM call that outputs a
     routing decision. That is the whole agent.
   - After triage, control is transferred. Triage is not invoked again.
-  - A specialist can itself trigger another handoff (researcher → summarizer)
-    without consulting triage.
+  - A specialist can itself trigger another handoff (researcher → fact_checker
+    → summarizer) without consulting triage.
+  - The fact-checker can hand off BACK to the researcher if evidence is weak,
+    creating a tight loop without involving triage.
 
 The orchestrator below is a while loop that just keeps pulling the "next
 agent" off a queue until someone returns a `done` result.
@@ -46,6 +53,7 @@ from groq import Groq
 
 from researcher_agent import run_researcher_agent
 from summarizer_agent import run_summarizer_agent
+from fact_checker_agent import run_fact_checker_agent
 
 load_dotenv()
 
@@ -65,7 +73,7 @@ def call_llm(messages):
 # That minimal shape is the point: a triage agent is just a classifier with
 # a handoff target attached to each class.
 # ---------------------------------------------------------------------------
-TRIAGE_TARGETS = ["researcher", "summarizer"]
+TRIAGE_TARGETS = ["researcher", "summarizer", "fact_checker"]
 
 
 def triage(user_goal):
@@ -74,20 +82,22 @@ you choose which specialist should own the task and then hand off control.
 
 Specialists you can hand off to:
   - researcher: given a TOPIC, pulls facts from a knowledge base.
+  - fact_checker: given TEXT with claims, verifies each claim against a KB.
   - summarizer: given a TEXT, compresses it into one sentence.
 
 Reply with ONE JSON object only:
 {{
-  "target": "<researcher or summarizer>",
+  "target": "<researcher or fact_checker or summarizer>",
   "handoff_goal": "<the goal restated in the form that specialist expects>",
   "reasoning": "<one sentence>"
 }}
 
 Rules:
 - If the user wants research (even if they also want it summarized later),
-  hand off to researcher first. The researcher can hand off to the summarizer
-  itself when it finishes.
-- If the user already has the text and just wants compression, hand off
+  hand off to researcher first. The researcher can hand off to the
+  fact-checker and then the summarizer itself when it finishes.
+- If the user already has text and wants it verified, hand off to fact_checker.
+- If the user already has verified text and just wants compression, hand off
   straight to summarizer.
 """
     raw = call_llm(
@@ -112,18 +122,33 @@ Rules:
 def run_researcher_with_handoff(goal, user_goal):
     facts = run_researcher_agent(goal)
 
-    # Decide whether to hand off further. The rule is simple and written in
-    # plain Python — no extra LLM call. If the ORIGINAL user goal mentions
-    # summarization, we chain to the summarizer. Otherwise we're done.
-    if _wants_summary(user_goal):
-        print("\n[HANDOFF] researcher → summarizer")
-        return {"kind": "handoff", "target": "summarizer", "goal": facts}
+    # Decide whether to hand off further. If the user goal mentions
+    # verification or summarization, chain to fact_checker first.
+    if _wants_verification(user_goal) or _wants_summary(user_goal):
+        print("\n[HANDOFF] researcher → fact_checker")
+        return {"kind": "handoff", "target": "fact_checker", "goal": facts}
     return {"kind": "done", "answer": facts}
+
+
+def run_fact_checker_with_handoff(goal, user_goal):
+    verdict = run_fact_checker_agent(goal)
+
+    # If the verdict mentions weak claims, hand back to researcher for
+    # more evidence — this is the tight loop the lecture describes.
+    if "WEAK" in verdict.upper() and not _already_retried(user_goal):
+        print("\n[HANDOFF] fact_checker → researcher (weak claims found)")
+        return {"kind": "handoff", "target": "researcher", "goal": goal}
+
+    # Otherwise chain to summarizer if the user wants a summary.
+    if _wants_summary(user_goal):
+        print("\n[HANDOFF] fact_checker → summarizer")
+        combined = f"{goal}\n\nFact-check verdict: {verdict}"
+        return {"kind": "handoff", "target": "summarizer", "goal": combined}
+    return {"kind": "done", "answer": verdict}
 
 
 def run_summarizer_with_handoff(goal, user_goal):
     summary = run_summarizer_agent(goal)
-    # Summarizer is always terminal in this demo.
     return {"kind": "done", "answer": summary}
 
 
@@ -132,8 +157,25 @@ def _wants_summary(user_goal):
     return any(word in text for word in ("summar", "one sentence", "tl;dr", "brief"))
 
 
+def _wants_verification(user_goal):
+    text = (user_goal or "").lower()
+    return any(word in text for word in ("verif", "fact", "check", "accurate"))
+
+
+_retried = False
+
+def _already_retried(user_goal):
+    """Prevent infinite fact_checker ↔ researcher loops (max one retry)."""
+    global _retried
+    if _retried:
+        return True
+    _retried = True
+    return False
+
+
 AGENTS = {
     "researcher": run_researcher_with_handoff,
+    "fact_checker": run_fact_checker_with_handoff,
     "summarizer": run_summarizer_with_handoff,
 }
 
@@ -142,10 +184,13 @@ AGENTS = {
 # Orchestrator — the only thing that understands handoffs. Every participating
 # agent just returns {"kind": "done"} or {"kind": "handoff"}.
 # ---------------------------------------------------------------------------
-MAX_HANDOFFS = 4
+MAX_HANDOFFS = 6
 
 
 def run_with_handoff(user_goal):
+    global _retried
+    _retried = False
+
     print("=" * 60)
     print(f"🎯 USER GOAL: {user_goal}")
     print("=" * 60)
@@ -197,11 +242,13 @@ def _parse_json(text):
 
 
 if __name__ == "__main__":
-    # Expected path: triage → researcher → (chain) → summarizer → done
-    run_with_handoff("Research Jupiter and Saturn and give me a one-sentence summary.")
-
-    # Expected path: triage → summarizer → done (no research needed)
+    # Expected path: triage → researcher → fact_checker → summarizer → done
     run_with_handoff(
-        "Summarize this: Mars is the fourth planet from the Sun. "
+        "Research Jupiter and Saturn, verify the facts, and give me a one-sentence summary."
+    )
+
+    # Expected path: triage → fact_checker → summarizer → done
+    run_with_handoff(
+        "Verify and summarize this: Mars is the fourth planet from the Sun. "
         "NASA's Perseverance rover landed in Jezero Crater in 2021."
     )
